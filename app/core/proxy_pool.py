@@ -50,20 +50,36 @@ class ProxyPoolManager:
         self._requests_served = 0
         self._refresh_task: Optional[asyncio.Task] = None
         self._tor_rotate_task: Optional[asyncio.Task] = None
+        self._initialized = False
 
     # ── Startup ──────────────────────────────────────────────────────────────
 
     async def start(self):
         """App startup pe call karo"""
+        if self._initialized:
+            return  # Already started
+        
         log.info("🚀 Proxy Pool Manager starting...")
-        await self.refresh_pool()
+        try:
+            await self.refresh_pool()
+            self._initialized = True
+        except Exception as e:
+            log.error(f"Failed to refresh proxy pool on startup: {e}")
+            self._initialized = False
+            # Continue anyway - will use direct connection
 
-        # Background auto-refresh task
-        self._refresh_task = asyncio.create_task(self._auto_refresh_loop())
+        # Background auto-refresh task (don't await on Vercel)
+        try:
+            self._refresh_task = asyncio.create_task(self._auto_refresh_loop())
+        except Exception as e:
+            log.warning(f"Could not create auto-refresh task: {e}")
 
         if settings.USE_TOR:
-            self._tor_rotate_task = asyncio.create_task(self._tor_rotate_loop())
-            log.info("🧅 Tor rotation enabled")
+            try:
+                self._tor_rotate_task = asyncio.create_task(self._tor_rotate_loop())
+                log.info("🧅 Tor rotation enabled")
+            except Exception as e:
+                log.warning(f"Could not setup Tor rotation: {e}")
 
     async def stop(self):
         """App shutdown pe call karo"""
@@ -97,20 +113,35 @@ class ProxyPoolManager:
 
         all_proxies: List[str] = []
 
-        # Sab sources se parallel fetch
-        tasks = [self._fetch_from_source(src) for src in PROXY_SOURCES]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Sab sources se parallel fetch with timeout
+        try:
+            tasks = [self._fetch_from_source(src) for src in PROXY_SOURCES]
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=30.0  # 30 second timeout for all sources
+            )
 
-        for result in results:
-            if isinstance(result, list):
-                all_proxies.extend(result)
+            for result in results:
+                if isinstance(result, list):
+                    all_proxies.extend(result)
+        except asyncio.TimeoutError:
+            log.warning("Proxy fetching timed out")
+            all_proxies = []
 
         # Deduplicate
         all_proxies = list(set(all_proxies))
         log.info(f"📦 Total raw proxies: {len(all_proxies)}")
 
-        # Test proxies (parallel, limited concurrency)
-        alive = await self._test_proxies_batch(all_proxies)
+        # Test proxies (parallel, limited concurrency) with timeout
+        alive = []
+        if all_proxies:
+            try:
+                alive = await asyncio.wait_for(
+                    self._test_proxies_batch(all_proxies),
+                    timeout=60.0  # 60 second timeout for testing
+                )
+            except asyncio.TimeoutError:
+                log.warning("Proxy testing timed out")
 
         async with self._lock:
             self._pool = alive
@@ -164,9 +195,11 @@ class ProxyPoolManager:
         if settings.USE_TOR:
             return f"socks5://127.0.0.1:{settings.TOR_SOCKS_PORT}"
 
+        # If no proxies and never initialized, don't log warning every time
         alive = [p for p in self._pool if p.is_alive]
         if not alive:
-            log.warning("⚠️ No alive proxies! Direct connection use ho raha hai")
+            if self._initialized:
+                log.warning("⚠️ No alive proxies! Direct connection use ho raha hai")
             return None
 
         # Round robin

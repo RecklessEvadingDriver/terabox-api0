@@ -67,12 +67,18 @@ def build_client(proxy_url: Optional[str]) -> httpx.AsyncClient:
             "https://": proxy_url,
             "http://": proxy_url,
         }
+    
+    # Use safe defaults for Vercel environment
+    verify_ssl = True
+    if proxy_url and ("socks" in proxy_url or proxy_url.startswith("http://")):
+        verify_ssl = False  # Only disable for SOCKS and unencrypted proxies
+    
     return httpx.AsyncClient(
         headers=BASE_HEADERS,
         proxies=proxies,
         timeout=settings.TERABOX_TIMEOUT,
         follow_redirects=True,
-        verify=False,  # SSL ignore (proxy compatibility)
+        verify=verify_ssl,
     )
 
 
@@ -128,76 +134,79 @@ class TeraboxFetcher:
 
     async def _fetch(self, surl: str, share_url: str, proxy_url: Optional[str]) -> dict:
         """Actual Terabox API calls"""
-        async with build_client(proxy_url) as client:
+        try:
+            async with build_client(proxy_url) as client:
 
-            # ── Step 1: shorturlinfo ──────────────────────────────────────────
-            info_url = (
-                f"https://www.terabox.com/api/shorturlinfo"
-                f"?app_id={settings.TERABOX_APP_ID}"
-                f"&shorturl={surl}&root=1"
-            )
-            info_res = await client.get(info_url)
-            info_res.raise_for_status()
-            info = info_res.json()
+                # ── Step 1: shorturlinfo ──────────────────────────────────────────
+                info_url = (
+                    f"https://www.terabox.com/api/shorturlinfo"
+                    f"?app_id={settings.TERABOX_APP_ID}"
+                    f"&shorturl={surl}&root=1"
+                )
+                info_res = await client.get(info_url)
+                info_res.raise_for_status()
+                info = info_res.json()
+        except Exception as e:
+            raise ValueError(f"Failed to fetch shorturlinfo: {str(e)}")
 
-            log.debug(f"shorturlinfo response errno: {info.get('errno')}")
+                log.debug(f"shorturlinfo response errno: {info.get('errno')}")
 
-            if info.get("errno") != 0:
-                errno = info.get("errno")
-                messages = {
-                    -6: "Login required (private file)",
-                    -1: "Invalid share link",
-                    2: "Link expired",
-                    105: "Illegal link",
+                if info.get("errno") != 0:
+                    errno = info.get("errno")
+                    messages = {
+                        -6: "Login required (private file)",
+                        -1: "Invalid share link",
+                        2: "Link expired",
+                        105: "Illegal link",
+                    }
+                    raise ValueError(messages.get(errno, f"Terabox error: {errno}"))
+
+                shareid   = info["shareid"]
+                uk        = info["uk"]
+                sign      = info["sign"]
+                timestamp = info["timestamp"]
+                file_list = info.get("list", [])
+
+                if not file_list:
+                    raise ValueError("File list empty hai — folder ya deleted file")
+
+                # ── Step 2: File metadata ─────────────────────────────────────────
+                file = file_list[0]
+                fs_id    = file["fs_id"]
+                filename = file.get("server_filename", "unknown")
+                size     = file.get("size", 0)
+                thumb    = file.get("thumbs", {}).get("url3", "") or \
+                           file.get("thumbs", {}).get("url2", "")
+
+                log.debug(f"File: {filename} | Size: {bytes_to_mb(size)} MB | fs_id: {fs_id}")
+
+                # ── Step 3: Download link ─────────────────────────────────────────
+                dl_url = (
+                    f"https://www.terabox.com/api/dlink"
+                    f"?app_id={settings.TERABOX_APP_ID}"
+                    f"&shareid={shareid}&uk={uk}"
+                    f"&sign={sign}&timestamp={timestamp}"
+                    f"&fs_id={fs_id}&type=3"
+                )
+                dl_res = await client.get(dl_url)
+                dl_res.raise_for_status()
+                dl_data = dl_res.json()
+
+                dlink = dl_data.get("dlink") or dl_data.get("list", [{}])[0].get("dlink")
+                if not dlink:
+                    raise ValueError("dlink response mein nahi mila")
+
+                return {
+                    "success": True,
+                    "filename": filename,
+                    "size_bytes": size,
+                    "size_mb": bytes_to_mb(size),
+                    "thumbnail": thumb,
+                    "direct_link": dlink,
+                    "share_url": share_url,
+                    "shareid": str(shareid),
+                    "fs_id": str(fs_id),
                 }
-                raise ValueError(messages.get(errno, f"Terabox error: {errno}"))
-
-            shareid   = info["shareid"]
-            uk        = info["uk"]
-            sign      = info["sign"]
-            timestamp = info["timestamp"]
-            file_list = info.get("list", [])
-
-            if not file_list:
-                raise ValueError("File list empty hai — folder ya deleted file")
-
-            # ── Step 2: File metadata ─────────────────────────────────────────
-            file = file_list[0]
-            fs_id    = file["fs_id"]
-            filename = file.get("server_filename", "unknown")
-            size     = file.get("size", 0)
-            thumb    = file.get("thumbs", {}).get("url3", "") or \
-                       file.get("thumbs", {}).get("url2", "")
-
-            log.debug(f"File: {filename} | Size: {bytes_to_mb(size)} MB | fs_id: {fs_id}")
-
-            # ── Step 3: Download link ─────────────────────────────────────────
-            dl_url = (
-                f"https://www.terabox.com/api/dlink"
-                f"?app_id={settings.TERABOX_APP_ID}"
-                f"&shareid={shareid}&uk={uk}"
-                f"&sign={sign}&timestamp={timestamp}"
-                f"&fs_id={fs_id}&type=3"
-            )
-            dl_res = await client.get(dl_url)
-            dl_res.raise_for_status()
-            dl_data = dl_res.json()
-
-            dlink = dl_data.get("dlink") or dl_data.get("list", [{}])[0].get("dlink")
-            if not dlink:
-                raise ValueError("dlink response mein nahi mila")
-
-            return {
-                "success": True,
-                "filename": filename,
-                "size_bytes": size,
-                "size_mb": bytes_to_mb(size),
-                "thumbnail": thumb,
-                "direct_link": dlink,
-                "share_url": share_url,
-                "shareid": str(shareid),
-                "fs_id": str(fs_id),
-            }
 
     async def get_batch_links(self, urls: list) -> list:
         """Multiple URLs process karo"""
