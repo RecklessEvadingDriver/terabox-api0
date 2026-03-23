@@ -23,12 +23,17 @@ async def lifespan(app: FastAPI):
     log.info(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} starting...")
     # Vercel serverless pe background tasks nahi chalte
     # Proxy pool lazy-load hoga pehli request pe
-    import asyncio
-    asyncio.create_task(proxy_pool.start())
+    try:
+        await proxy_pool.start()
+    except Exception as e:
+        log.error(f"Proxy pool startup error: {e}, continuing with empty pool")
     log.info("✅ Startup done!")
     yield
     log.info("🛑 Shutting down...")
-    await proxy_pool.stop()
+    try:
+        await proxy_pool.stop()
+    except Exception as e:
+        log.warning(f"Proxy pool shutdown error: {e}")
 
 
 # ─── App Init ─────────────────────────────────────────────────────────────────
@@ -122,3 +127,29 @@ async def health():
         "proxy_pool_size": stats["active_proxies"],
         "tor_enabled": stats["tor_enabled"],
     }
+
+
+@app.post("/init", tags=["Info"])
+async def initialize():
+    """Manual proxy pool initialization (for Vercel cold starts)"""
+    log.info("Manual initialization requested")
+    try:
+        await proxy_pool.start()
+        stats = proxy_pool.stats()
+        return {
+            "status": "initialized",
+            "active_proxies": stats["active_proxies"],
+            "message": f"Proxy pool initialized with {stats['active_proxies']} alive proxies"
+        }
+    except Exception as e:
+        log.error(f"Initialization failed: {e}")
+        return {
+            "status": "partial",
+            "error": str(e),
+            "message": "Proxy pool will work with direct connection fallback"
+        }
+
+
+# ─── WSGI Export for Vercel ─────────────────────────────────────────────────────
+# Vercel needs the app object directly
+__all__ = ['app']
