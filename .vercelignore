@@ -1,0 +1,15 @@
+logs/
+logs/*
+*.log
+.pytest_cache/
+.git/
+.gitignore
+README.md
+.env.local
+.env.*.local
+__pycache__/
+*.pyc
+.DS_Store
+test_startup.py
+.venv/
+venv/

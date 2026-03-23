@@ -1,9 +1,16 @@
 {
   "version": 2,
+  "env": {
+    "PYTHONUNBUFFERED": "1"
+  },
   "builds": [
     {
       "src": "main.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python@3.1.0",
+      "config": {
+        "maxLambdaSize": "50mb",
+        "maxLambdaTimeout": 60
+      }
     }
   ],
   "routes": [
@@ -11,5 +18,11 @@
       "src": "/(.*)",
       "dest": "main.py"
     }
-  ]
+  ],
+  "functions": {
+    "main.py": {
+      "maxDuration": 60,
+      "memory": 3008
+    }
+  }
 }

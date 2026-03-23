@@ -1,11 +1,16 @@
 import asyncio
 import time
 import random
+import sys
 from typing import Optional, List
 from dataclasses import dataclass, field
 import httpx
 from app.core.config import settings
 from app.utils.logger import log
+
+# Ensure asyncio event loop policy is set for Vercel
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 @dataclass
@@ -44,13 +49,19 @@ TEST_URL = "https://httpbin.org/ip"
 class ProxyPoolManager:
     def __init__(self):
         self._pool: List[ProxyEntry] = []
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self._index = 0
         self._last_refreshed: Optional[float] = None
         self._requests_served = 0
         self._refresh_task: Optional[asyncio.Task] = None
         self._tor_rotate_task: Optional[asyncio.Task] = None
         self._initialized = False
+    
+    def _get_lock(self) -> asyncio.Lock:
+        """Lazy initialize lock - avoids event loop issues on import"""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # ── Startup ──────────────────────────────────────────────────────────────
 
@@ -143,7 +154,7 @@ class ProxyPoolManager:
             except asyncio.TimeoutError:
                 log.warning("Proxy testing timed out")
 
-        async with self._lock:
+        async with self._get_lock():
             self._pool = alive
             self._last_refreshed = time.time()
             self._index = 0

@@ -148,3 +148,8 @@ async def initialize():
             "error": str(e),
             "message": "Proxy pool will work with direct connection fallback"
         }
+
+
+# ─── WSGI Export for Vercel ─────────────────────────────────────────────────────
+# Vercel needs the app object directly
+__all__ = ['app']
